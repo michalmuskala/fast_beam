@@ -1,0 +1,10 @@
+[package]
+authors = ["Michał Muskała <michal@muskala.eu>"]
+edition = "2018"
+name = "fast_beam"
+version = "0.1.0"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.3"
