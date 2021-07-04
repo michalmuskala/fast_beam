@@ -274,4 +274,29 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn expt_chunk() {
+        let mut file = BeamFile::<_, NaiveInterner>::from_file("fixtures/test.beam").unwrap();
+        file.index_atoms(NaiveInterner::default()).unwrap();
+        let chunk: ExpTChunk<String> = file.read().unwrap();
+
+        assert_eq!(chunk.exports.len(), 2);
+        assert_eq!(
+            chunk.exports[0],
+            Export {
+                function: "module_info".to_string(),
+                arity: 1,
+                label: 4,
+            }
+        );
+        assert_eq!(
+            chunk.exports[1],
+            Export {
+                function: "module_info".to_string(),
+                arity: 0,
+                label: 2,
+            }
+        );
+    }
 }
