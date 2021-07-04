@@ -1,8 +1,9 @@
 use std::{
     fmt,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{Cursor, Read, Seek, SeekFrom},
     path::Path,
+    str,
 };
 
 use byteorder::{BigEndian, ReadBytesExt};
@@ -25,6 +26,18 @@ pub trait Interner {
     }
 }
 
+/// A "naive" interner that just allocates the string
+#[derive(Default)]
+pub struct NaiveInterner;
+
+impl Interner for NaiveInterner {
+    type Atom = String;
+
+    fn intern(&self, name: &str) -> Self::Atom {
+        name.to_string()
+    }
+}
+
 /// The identifier which indicates the type of a chunk.
 #[derive(PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct Id([u8; 4]);
@@ -37,7 +50,7 @@ impl From<[u8; 4]> for Id {
 
 impl fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match std::str::from_utf8(&self.0) {
+        match str::from_utf8(&self.0) {
             Ok(str) => f.write_fmt(format_args!("b{:?}", str)),
             Err(_) => f.write_fmt(format_args!("{:?}", self.0)),
         }
@@ -55,6 +68,9 @@ pub enum BeamFileError {
     #[error("Chunk {0:?} not found")]
     MissingChunk(Id),
 
+    #[error("Invalid atom")]
+    InvalidAtom(#[from] str::Utf8Error),
+
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -70,27 +86,32 @@ struct IndexEntry {
 type Index = FxHashMap<Id, IndexEntry>;
 
 #[derive(Clone)]
-pub struct BeamFile<R> {
+pub struct BeamFile<R, I: Interner> {
     reader: R,
     index: Index,
+    atom_index: Option<Vec<I::Atom>>,
 }
 
-impl<R> fmt::Debug for BeamFile<R> {
+impl<R, I: Interner> fmt::Debug for BeamFile<R, I>
+where
+    I::Atom: fmt::Debug,
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BeamFile")
+            .field("name", &self.name())
             .field("chunks", &self.index.keys().collect::<FxHashSet<_>>())
             .finish()
     }
 }
 
-impl BeamFile<File> {
+impl<I: Interner> BeamFile<File, I> {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = File::open(path)?;
         Self::from_reader(file)
     }
 }
 
-impl<R: Read + Seek> BeamFile<R> {
+impl<R: Read + Seek, I: Interner> BeamFile<R, I> {
     pub fn from_reader(mut reader: R) -> Result<Self> {
         let mut magic_number = [0; 4];
         reader.read_exact(&mut magic_number)?;
@@ -130,12 +151,23 @@ impl<R: Read + Seek> BeamFile<R> {
             ))?;
         }
 
-        Ok(Self { reader, index })
+        Ok(Self {
+            reader,
+            index,
+            atom_index: None,
+        })
     }
 
     pub fn read_raw(&mut self, id: Id) -> Result<Vec<u8>> {
         let entry = self.index.get(&id).ok_or(BeamFileError::MissingChunk(id))?;
         Self::read_entry(&mut self.reader, entry)
+    }
+
+    pub fn iter_raw(&mut self) -> impl Iterator<Item = (Id, Result<Vec<u8>>)> + '_ {
+        let reader = &mut self.reader;
+        self.index
+            .iter()
+            .map(move |(id, entry)| (*id, Self::read_entry(reader, entry)))
     }
 
     fn read_entry(reader: &mut R, entry: &IndexEntry) -> Result<Vec<u8>> {
@@ -147,18 +179,60 @@ impl<R: Read + Seek> BeamFile<R> {
         Ok(data)
     }
 
-    pub fn iter_raw(&mut self) -> impl Iterator<Item = (Id, Result<Vec<u8>>)> + '_ {
-        let reader = &mut self.reader;
-        self.index
-            .iter()
-            .map(move |(id, entry)| (*id, Self::read_entry(reader, entry)))
+    /// Decodes the atom chunk and stores the result for further processing
+    pub fn index_atoms(&mut self, interner: I) -> Result<()> {
+        let raw = match self.read_raw((*b"AtU8").into()) {
+            Ok(raw) => raw,
+            Err(BeamFileError::MissingChunk(_)) => self.read_raw((*b"Atom").into())?,
+            Err(err) => return Err(err),
+        };
+        let mut reader = Cursor::new(raw);
+
+        let count = reader.read_u32::<BigEndian>()? as usize;
+        let mut atoms = Vec::with_capacity(count);
+
+        let mut buf = Vec::new();
+
+        for _ in 0..count {
+            let len = reader.read_u8()? as usize;
+            buf.resize(len, 0);
+            reader.read_exact(&mut buf)?;
+            let name = str::from_utf8(&buf)?;
+            atoms.push(interner.intern(name));
+        }
+
+        self.atom_index = Some(atoms);
+
+        Ok(())
+    }
+}
+
+impl<R, I: Interner> BeamFile<R, I> {
+    /// Returns the module name
+    ///
+    /// Returns `None` if atoms weren't indexed yet.
+    /// Relies on the fact that the module name is the first atom in the atom table.
+    pub fn name(&self) -> Option<&I::Atom> {
+        self.atom_index.as_ref().and_then(|index| index.get(0))
+    }
+
+    pub fn atom_index(&self) -> Option<&[I::Atom]> {
+        self.atom_index.as_deref()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
+    fn index_atoms() {
+        let mut file = BeamFile::<_, NaiveInterner>::from_file("fixtures/test.beam").unwrap();
+
+        assert_eq!(file.name(), None);
+        file.index_atoms(NaiveInterner::default()).unwrap();
+        assert_eq!(file.name(), Some(&"test".to_string()));
+
+        assert_eq!(file.atom_index().unwrap().len(), 4);
     }
 }
