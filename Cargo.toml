@@ -5,6 +5,14 @@ name = "fast_beam"
 version = "0.1.0"
 
 [dependencies]
+byteorder = "1.4.3"
+fxhash = "0.2.1"
+thiserror = "1.0.26"
 
 [dev-dependencies]
+beam_file = "0.2.4"
 criterion = "0.3"
+
+[[bench]]
+harness = false
+name = "load_otp"
