@@ -10,6 +10,10 @@ use byteorder::{BigEndian, ReadBytesExt};
 use fxhash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
+mod chunk;
+
+pub use chunk::*;
+
 /// String interner used for efficiently reading atoms
 pub trait Interner {
     type Atom;
@@ -158,6 +162,16 @@ impl<R: Read + Seek, I: Interner> BeamFile<R, I> {
         })
     }
 
+    /// Reads a structured chunk representation
+    ///
+    /// Panics if the atoms weren't index with `index_atoms`.
+    pub fn read<C: Chunk<Atom = I::Atom> + Sized>(&mut self) -> Result<C> {
+        let raw = self.read_raw(C::ID)?;
+        let reader = Cursor::new(raw);
+        let atom_index = self.atom_index.as_deref().unwrap();
+        C::decode(reader, atom_index)
+    }
+
     pub fn read_raw(&mut self, id: Id) -> Result<Vec<u8>> {
         let entry = self.index.get(&id).ok_or(BeamFileError::MissingChunk(id))?;
         Self::read_entry(&mut self.reader, entry)
@@ -234,5 +248,30 @@ mod tests {
         assert_eq!(file.name(), Some(&"test".to_string()));
 
         assert_eq!(file.atom_index().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn impt_chunk() {
+        let mut file = BeamFile::<_, NaiveInterner>::from_file("fixtures/test.beam").unwrap();
+        file.index_atoms(NaiveInterner::default()).unwrap();
+        let chunk: ImpTChunk<String> = file.read().unwrap();
+
+        assert_eq!(chunk.imports.len(), 2);
+        assert_eq!(
+            chunk.imports[0],
+            Import {
+                module: "erlang".to_string(),
+                function: "get_module_info".to_string(),
+                arity: 1,
+            }
+        );
+        assert_eq!(
+            chunk.imports[1],
+            Import {
+                module: "erlang".to_string(),
+                function: "get_module_info".to_string(),
+                arity: 2,
+            }
+        );
     }
 }
